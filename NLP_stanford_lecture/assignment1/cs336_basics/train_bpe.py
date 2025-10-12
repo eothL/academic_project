@@ -1,26 +1,17 @@
 # libraries
 from datasets import load_dataset
-import os
-from typing import BinaryIO
 import regex as re
 import multiprocessing #to parallelize the tokenization 
-import pyarrow as pa
 from collections import defaultdict, Counter
-import multiprocessing 
+import time
 
+def get_compression_rate(token_list : list, string: str) ->float:
+    """Given string that has been tokenized into indices """
+    num_bytes = len(bytes(string, encoding= "utf-8"))
+    num_tokens = len(token_list)
+    return num_bytes/num_tokens
 
-# loading data
-def load_data(input_path:str, file_name :str) -> str:
-    """Load text data"""
-    file_path = "/".join([input_path,file_name])
-    with open(file_path, "r", encoding ='utf-8') as f:
-        return f.read()
-
-# test
-# text_data = load_data(input_path,file_name)
-# print(f'loaded{len(text_data)} characters')
-
-def pre_tokenize(base_pattern :str, text: str,special_tokens: list[str]) -> dict[bytes,int]:
+def pretokenize(base_pattern :str, text: str,special_tokens: list[str]) -> dict[bytes,int]:
     """
     pre tokenize the text and return a list of pre tokenize text
     """
@@ -28,21 +19,23 @@ def pre_tokenize(base_pattern :str, text: str,special_tokens: list[str]) -> dict
 
     # define the pattern use by regex
     # by defining special pattern, we don't add the special tokens in the list
-    special_pattern = '|'.join([re.escape(token) for token in special_tokens])
-    full_pattern = f'({special_pattern})|({base_pattern})'
+    if special_tokens:
+        special_pattern = '|'.join([re.escape(token) for token in special_tokens])
+        full_pattern = f'({special_pattern})|({base_pattern})'
+    else:
+        full_pattern = base_pattern
 
+    # # DEBUG: Let's see what patterns are being created
+    # print(f"Special tokens: {special_tokens}")
+    # print(f"Escaped special pattern: {special_pattern}")
+    # print(f"Base pattern: {base_pattern}")
+    # print(f"Full pattern: {full_pattern}")
 
-    # DEBUG: Let's see what patterns are being created
-    print(f"Special tokens: {special_tokens}")
-    print(f"Escaped special pattern: {special_pattern}")
-    print(f"Base pattern: {base_pattern}")
-    print(f"Full pattern: {full_pattern}")
-
-    try: 
-        re.compile(full_pattern)
-        print("it is working well")
-    except re.error as e:
-        raise ValueError(f'invalid regex patter: {e}')
+    # try: 
+    #     re.compile(full_pattern)
+    #     print("working pattern")
+    # except re.error as e:
+    #     raise ValueError(f'invalid regex pattern: {e}')
 
 
     pre_tokenize_list = []
@@ -77,10 +70,32 @@ def train_bpe(
     special_tokens : list[str]
 ) -> tuple[dict[int,bytes], list[tuple[bytes,bytes]]]:
     """  train a bpe tokenizer and return the merged vocab  """
-    data 
-    pretoken_counts = 0
+    print(" Starting BPE training...")
+    start_time = time.time()
+    
+    # Phase 1: Reading file
+    print(" Reading input file...")
+    file_start = time.time()
+    with open(input_path, "r", encoding = "utf-8") as f:
+        data = f.read()
+    file_time = time.time() - file_start
+    print(f"   File read in {file_time:.2f} seconds")
+    
+    # Phase 2: Pretokenization
+    print(" Pretokenizing text...")
+    pretoken_start = time.time()
+    gpt2_regex = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+    pretoken_counts = pretokenize(gpt2_regex, data, special_tokens)
+    pretoken_time = time.time() - pretoken_start
+    print(f"    Pretokenization completed in {pretoken_time:.2f} seconds")
+    print(f"    Found {len(pretoken_counts)} unique pretokens")
+    # Phase 3: Vocabulary initialization
+    print(" Initializing vocabulary...")
+    vocab_start = time.time()
     # initialization of vocabulary
-    # we keep two dictionaries to accelerate the process as it is easier to make lookups
+    # These are two dictionaries, which allow for fast lookups in both directions:  
+    #   - id_to_token: from integer id to bytes token
+    #   - token_to_id: from bytes token to integer id
     id_to_token: dict[int,bytes] = {}  # maps vocab id (int) to token (bytes)
     token_to_id: dict[bytes, int] = {} # maps token (bytes) to vocab id (int)
     # initialization of the vocab with numbers from 0 to 255, so we will have bytes 0 to 255
@@ -98,17 +113,13 @@ def train_bpe(
 
     base_size = 256 + len(special_tokens)
     assert vocab_size >= base_size
+    vocab_time = time.time() - vocab_start
+    print(f"   Vocabulary initialized in {vocab_time:.2f} seconds")
+    print(f"   Base vocabulary size: {base_size}")
 
-    # --- COMMENT VERIFICATION ---
-    # Your comment: 
-    # "we keep two list to accelerate the process as it is easier to make lookups"
-    # Correction: 
-    # These are actually two dictionaries (not lists), which allow for fast lookups in both directions:
-    #   - id_to_token: from integer id to bytes token
-    #   - token_to_id: from bytes token to integer id
-    # This is a standard approach for vocabularies in tokenization, enabling efficient mapping in both directions.
-    # The rest of your comments about initializing the vocab with bytes 0-255 and adding special tokens are correct.
-
+    # Phase 4: Sequence preparation
+    print(" Preparing sequences...")
+    seq_start = time.time()
     merge_history : list[tuple[bytes, bytes]] = [] # to store merge history records
     num_merges = vocab_size - base_size
     
@@ -128,19 +139,30 @@ def train_bpe(
         # It returns the value associated with 'seq' if it exists in 'sequences', otherwise it returns 0.
         sequences[seq] = sequences.get(seq, 0) + count #safeguard to use sequences.get(seq,0) + count instead of just count
         # In which scenario we need it ? : if we go through another chunk and we encounter the same tuple, we will add the count 
-        # instead of rewriting it 
+        # instead of rewriting it
+    print('sequences initialization',sequences)
+    seq_time = time.time() - seq_start
+    print(f"   Sequences prepared in {seq_time:.2f} seconds")
+    print(f"   Total sequences: {len(sequences)}") 
     
-    # number of merges
-    for _ in range(num_merges):
+    # Phase 5: BPE Merging
+    print(f" Starting BPE merging ({num_merges} merges)...")
+    merge_start = time.time()
+    for merge_idx in range(num_merges):
+        if merge_idx % 50 == 0:  # Progress update every 50 merges
+            print(f"   Progress: {merge_idx}/{num_merges} merges completed")
+            
+            print(f"merge_idx {merge_idx}:\n",sequences)
         pair_counts = Counter()  # count how often each adjacent pair occurs
         for seq, count in sequences.items():
             for j in range(len(seq) - 1):
                 pair_counts[(seq[j], seq[j + 1])] += count
 
         if not pair_counts:
+            print(f"    No more pairs to merge at iteration {merge_idx}")
             break  # nothing left to merge
 
-        (a, b), freq = pair_counts.most_common(1)[0]
+        (a, b), _ = pair_counts.most_common(1)[0]
         new_bytes = id_to_token[a] + id_to_token[b]
         if new_bytes in token_to_id:
             new_id = token_to_id[new_bytes]
@@ -155,22 +177,68 @@ def train_bpe(
             new_seq = replace_pair(seq, (a, b), new_id)
             updated_sequences[new_seq] += count
         sequences = dict(updated_sequences)
+    
+    merge_time = time.time() - merge_start
+    total_time = time.time() - start_time
+    
+    print(f"   BPE merging completed in {merge_time:.2f} seconds")
+    print(f"   Final vocabulary size: {len(id_to_token)}")
+    print(f"   Total merges performed: {len(merge_history)}")
+    print(f"   Total BPE training time: {total_time:.2f} seconds")
+    print("=" * 50)
+    
     return id_to_token, merge_history
 
 
 
 if __name__ == "__main__":
+    print("=" * 60)
+    print("  BPE TOKENIZER TRAINING WITH TIMING ANALYSIS")
+    print("=" * 60)
+    
     # init variable
-    input_path = r"C:\Users\theo-\OneDrive\Documents\VS Code project\NLP_stanford_lecture\assignment1-basics\cs336_basics\dataset"
-    file_name = "TinyStoriesV2-GPT4-valid.txt"
+    input_path_test = r"C:\Users\theo-\OneDrive\Documents\VS Code project\academic_project\NLP_stanford_lecture\assignment1\cs336_basics\dataset\testing_file.txt"
+    input_path = r"C:\Users\theo-\OneDrive\Documents\VS Code project\academic_project\NLP_stanford_lecture\assignment1\cs336_basics\dataset\TinyStoriesV2-GPT4-valid.txt"
     vocab_size = 600
     special_tokens =  ["<|endoftext|>"]
 
+    print(f" Configuration:")
+    print(f"   • Test file: {input_path_test}")
+    print(f"   • Main file: {input_path}")
+    print(f"   • Vocabulary size: {vocab_size}")
+    print(f"   • Special tokens: {special_tokens}")
+    print()
 
-    # test for pre_tokenize and merging 
+    # test for pretokenize step   
     text_test = "some text that i'll pre-tokenize and by pre-tokenize, I speak about pre-tokenize and i'll be right every time<|endoftext|>" 
 
-    pretoken_counts= pre_tokenize(r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""",text_test,special_tokens)
-    print(pretoken_counts)
-    id_to_token, merge_list = train_bpe(pretoken_counts, vocab_size, special_tokens)
-    print("bpe merging: \n",id_to_token)
+    # pretoken_counts= pretokenize(r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""",text_test,special_tokens)
+    # print(pretoken_counts)
+    # result
+    # Special tokens: ['<|endoftext|>']
+    # Escaped special pattern: <\|endoftext\|>
+    # Base pattern: '(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+
+    # Full pattern: (<\|endoftext\|>)|('(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+)
+    # it is working well
+    # {b'some': 1, b' text': 1, b' that': 1, b' i': 2, b"'ll": 2, b' pre': 3, b'-': 3, b'tokenize': 3, b' and': 2, b' by': 1, b',': 1, b' I': 1, b' speak': 1, b' about': 1, b' be': 1, b' right': 1, b' every': 1, b' time': 1, b'<|endoftext|>': 1}
+
+    # Training BPE tokenizer
+    print(" TRAINING BPE TOKENIZER")
+    print("-" * 40)
+    id_to_token, merge_list = train_bpe(input_path_test, vocab_size, special_tokens)
+
+    # Compression rate calculation
+    print(" COMPRESSION ANALYSIS")
+    print("-" * 40)
+    compression_start = time.time()
+    with open(input_path, "r", encoding = "utf-8") as f:
+        text = f.read()
+    compression_time = time.time() - compression_start
+    
+    print(f" Reading main file took: {compression_time:.2f} seconds")
+    print(f" File size: {len(text)} characters")
+    print(f" File size: {len(bytes(text, encoding='utf-8'))} bytes")
+    
+    compression_rate = get_compression_rate(id_to_token, text)
+    print(f" Compression rate: {compression_rate:.2f}")
+    print("=" * 60)
