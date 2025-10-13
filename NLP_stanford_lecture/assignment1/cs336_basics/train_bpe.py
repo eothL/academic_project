@@ -3,7 +3,8 @@ from datasets import load_dataset
 import regex as re
 import multiprocessing #to parallelize the tokenization 
 from collections import defaultdict, Counter
-import time
+import cProfile
+
 
 def get_compression_rate(token_list : list, string: str) ->float:
     """Given string that has been tokenized into indices """
@@ -148,29 +149,56 @@ def train_bpe(
     # Phase 5: BPE Merging
     print(f" Starting BPE merging ({num_merges} merges)...")
     merge_start = time.time()
+
+    pair_counts = Counter()  # count how often each adjacent pair occurs
+    pair_location = {} # list of places the pair appears (references to sequences + positions)
+
     for merge_idx in range(num_merges):
+
         if merge_idx % 50 == 0:  # Progress update every 50 merges
             print(f"   Progress: {merge_idx}/{num_merges} merges completed")
             
             print(f"merge_idx {merge_idx}:\n",sequences)
-        pair_counts = Counter()  # count how often each adjacent pair occurs
         for seq, count in sequences.items():
             for j in range(len(seq) - 1):
                 pair_counts[(seq[j], seq[j + 1])] += count
+                pair_location[j] = (seq[j], seq[j+1]) #position 
 
         if not pair_counts:
             print(f"    No more pairs to merge at iteration {merge_idx}")
             break  # nothing left to merge
 
         (a, b), _ = pair_counts.most_common(1)[0]
+        for i in range(1,len(pair_location)-2):
+            l_neighbors = pair_location[i-1]
+            r_neighbors = pair_location[i+1]
+            if l_neighbors==(a,b):
+                pair_counts[l_neighbors] -= 1
+
+            if r_neighbors[i+1]==(a,b):
+                pair_counts[r_neighbors] = 0
+
         new_bytes = id_to_token[a] + id_to_token[b]
-        if new_bytes in token_to_id:
+        if new_bytes in token_to_id: # do not create a new id if the new_bytes created already exist
             new_id = token_to_id[new_bytes]
         else:
             new_id = len(id_to_token)
             merge_history.append((id_to_token[a], id_to_token[b]))
             id_to_token[new_id] = new_bytes
             token_to_id[new_bytes] = new_id
+
+            # See some id_to_token words after each merge
+            sample_ids = sorted(list(id_to_token.keys()))[:10]  # Show first 10 ids as an example
+            print(f"   id_to_token sample after merge {len(merge_history)}:")
+            for i in sample_ids:
+                val = id_to_token[i]
+                # Try to decode bytes sensibly; if not possible, show repr
+                try:
+                    s = val.decode('utf-8')
+                except Exception:
+                    s = repr(val)
+                print(f"     {i}: {s}")
+
 
         updated_sequences: defaultdict[tuple[int, ...], int] = defaultdict(int)
         for seq, count in sequences.items():
