@@ -72,33 +72,32 @@ def train_bpe(
 ) -> tuple[dict[int,bytes], list[tuple[bytes,bytes]]]:
     """  train a bpe tokenizer and return the merged vocab  """
     print(" Starting BPE training...")
-    start_time = time.time()
     
     # Phase 1: Reading file
     print(" Reading input file...")
-    file_start = time.time()
     with open(input_path, "r", encoding = "utf-8") as f:
         data = f.read()
-    file_time = time.time() - file_start
-    print(f"   File read in {file_time:.2f} seconds")
+
     
     # Phase 2: Pretokenization
     print(" Pretokenizing text...")
-    pretoken_start = time.time()
     gpt2_regex = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
     pretoken_counts = pretokenize(gpt2_regex, data, special_tokens)
-    pretoken_time = time.time() - pretoken_start
-    print(f"    Pretokenization completed in {pretoken_time:.2f} seconds")
+
     print(f"    Found {len(pretoken_counts)} unique pretokens")
+
     # Phase 3: Vocabulary initialization
     print(" Initializing vocabulary...")
-    vocab_start = time.time()
     # initialization of vocabulary
     # These are two dictionaries, which allow for fast lookups in both directions:  
-    #   - id_to_token: from integer id to bytes token
+    #   - id_to_token: from integer id to bytes token which represent the vocab 
     #   - token_to_id: from bytes token to integer id
-    id_to_token: dict[int,bytes] = {}  # maps vocab id (int) to token (bytes)
-    token_to_id: dict[bytes, int] = {} # maps token (bytes) to vocab id (int)
+    # vocab
+    id_to_token: dict[int,bytes] = {}  # maps vocab id (int) to token (bytes) : {id : bytes}
+    # id_to_token represent the vocab we are creating with this algorithm that will grow as we continue to merge 
+    token_to_id: dict[bytes, int] = {} # maps token (bytes) to vocab id (int) : {bytes : id}
+
+
     # initialization of the vocab with numbers from 0 to 255, so we will have bytes 0 to 255
     for i in range(256):
         id_to_token[i] = bytes([i])
@@ -114,105 +113,160 @@ def train_bpe(
 
     base_size = 256 + len(special_tokens)
     assert vocab_size >= base_size
-    vocab_time = time.time() - vocab_start
-    print(f"   Vocabulary initialized in {vocab_time:.2f} seconds")
     print(f"   Base vocabulary size: {base_size}")
 
     # Phase 4: Sequence preparation
     print(" Preparing sequences...")
-    seq_start = time.time()
     merge_history : list[tuple[bytes, bytes]] = [] # to store merge history records
     num_merges = vocab_size - base_size
     
-    # prepares sequences once : initialization 
-    sequences: dict[tuple[int, ...], int] = {}  # updated corpus: maps token id tuples to counts
+    # prepares sequences once : initialization  
+
+    # --------------old way for a naive loop--------------------------------------------------------------------------------------------
+    # sequences: dict[tuple[int, ...], int] = {}  # updated corpus: maps token id tuples to counts
     # we are building here a dictionary whose keys are tupples of ids (current token sequences) and whose values are the counts 
     # keep in minds that BPE works over token ids, so the first thing we do is express each pre-token as a sequence of ids. 
-    for token_bytes, count in pretoken_counts.items(): 
-        # initialization of the updated corpus : we transfer every data from the pre tokenize list to the sequences
-        if token_bytes in token_to_id: # handle special token as they are already in the vocab 
-            seq = (token_to_id[token_bytes],) # for a special token, we only have one element tuple 
-        else:                                 # but for other words, we have multiple byte per word, for example the could be represented by a tuple like (116,104,101)
-            seq = tuple([token_to_id[bytes([b])] for b in token_bytes]) # so we have to add every bytes inside the tuple to add the sequences 
-        # The .get() method for dictionaries takes two arguments:
-        #   - The key to look up (here, 'seq')
-        #   - A default value to return if the key is not found (here, 0)
-        # It returns the value associated with 'seq' if it exists in 'sequences', otherwise it returns 0.
-        sequences[seq] = sequences.get(seq, 0) + count #safeguard to use sequences.get(seq,0) + count instead of just count
-        # In which scenario we need it ? : if we go through another chunk and we encounter the same tuple, we will add the count 
-        # instead of rewriting it
-    print('sequences initialization',sequences)
-    seq_time = time.time() - seq_start
-    print(f"   Sequences prepared in {seq_time:.2f} seconds")
-    print(f"   Total sequences: {len(sequences)}") 
+
+    # for token_bytes, count in pretoken_counts.items(): 
+    #     # initialization of the updated corpus : we transfer every data from the pre tokenize list to the sequences
+    #     if token_bytes in token_to_id: # handle special token as they are already in the vocab 
+    #         seq = (token_to_id[token_bytes],) # for a special token, we only have one element tuple 
+    #     else:                                 # but for other words, we have multiple byte per word, for example the could be represented by a tuple like (116,104,101)
+    #         seq = tuple([token_to_id[bytes([b])] for b in token_bytes]) # so we have to add every bytes inside the tuple to add the sequences 
+    #     # The .get() method for dictionaries takes two arguments:
+    #     #   - The key to look up (here, 'seq')
+    #     #   - A default value to return if the key is not found (here, 0)
+    #     # It returns the value associated with 'seq' if it exists in 'sequences', otherwise it returns 0.
+    #     sequences[seq] = sequences.get(seq, 0) + count #safeguard to use sequences.get(seq,0) + count instead of just count
+    #     # In which scenario we need it ? : if we go through another chunk and we encounter the same tuple, we will add the count 
+    #     # instead of rewriting it
+
+    # for merge_idx in range(num_merges):
+    #     pair_counts = Counter()  # count how often each adjacent pair occurs
+    #     for seq, count in sequences.items():
+    #         for j in range(len(seq) - 1):
+    #             pair_counts[(seq[j], seq[j + 1])] += count
+
+    #     if not pair_counts:
+    #         print(f"    No more pairs to merge at iteration {merge_idx}")
+    #         break  # nothing left to merge
+
+    #     (a, b), _ = pair_counts.most_common(1)[0]
+
+    #     new_bytes = id_to_token[a] + id_to_token[b]
+    #     if new_bytes in token_to_id: # do not create a new id if the new_bytes created already exist
+    #         new_id = token_to_id[new_bytes]
+    #     else:
+    #         new_id = len(id_to_token)
+    #         merge_history.append((id_to_token[a], id_to_token[b]))
+    #         id_to_token[new_id] = new_bytes
+    #         token_to_id[new_bytes] = new_id
+
+    #     updated_sequences: defaultdict[tuple[int, ...], int] = defaultdict(int)
+    #     for seq, count in sequences.items():
+    #         new_seq = replace_pair(seq, (a, b), new_id)
+    #         updated_sequences[new_seq] += count
+    #     sequences = dict(updated_sequences)
+    # --------------/old way for a naive loop--------------------------------------------------------------------------------------------
     
+    # --------------different approach to accelerate pair_counting : by updating only changed pair---------------------------------------
+    # we are now using two list of mutable token sequences instead of dict mapping tupple[int, ...] -> count 
+    # build a list of mutable token sequences 
+    # one per occurence in the corpus and to avoid duplicating a string n times for counting, we are adding a weight link to the occurence
+    # initialization of the corpus and its counting with the pretokenize text
+    corpus: list[list[int]] = []
+    weights: list[int] = [] # fix frequence of a word, we could call it freqs or counts here 
+
+    # each list in corpus is still a chunck of the original text, just expressed as ids instead of raw characters
+    
+    for token_bytes, count in pretoken_counts.items():
+        if token_bytes in token_to_id: 
+            # handle special tokens
+            seq = (token_to_id[token_bytes],)
+        else:
+            seq = [token_to_id[bytes(b)] for b in token_bytes]
+        corpus.append(seq)
+        weights.append(count)
+
     # Phase 5: BPE Merging
     print(f" Starting BPE merging ({num_merges} merges)...")
-    merge_start = time.time()
+    # pair counting
+    pair_counts : Counter[tuple[int,int]] = Counter()
+    pair_locs : dict[tuple[int,int],list[tuple[int,int]]] = defaultdict(list)
+    # pair_locs[(x, y)] = [(seq_idx, pos), ...]                                                                                             
+    for merge_idx in range (num_merges):
+        if not pair_counts: 
+            break
 
-    pair_counts = Counter()  # count how often each adjacent pair occurs
-    pair_location = {} # list of places the pair appears (references to sequences + positions)
+        for seq_idx, seq in enumerate(corpus):
+            w = weights[seq_idx]
+            for pos in range(len(seq) - 1):
+                pair = (seq[pos], seq[pos + 1])
+                pair_counts[pair] += w
+                pair_locs[pair].append((seq_idx, pos))
 
-    for merge_idx in range(num_merges):
+            (a, b), freq = pair_counts.most_common(1)[0]
 
-        if merge_idx % 50 == 0:  # Progress update every 50 merges
-            print(f"   Progress: {merge_idx}/{num_merges} merges completed")
-            
-            print(f"merge_idx {merge_idx}:\n",sequences)
-        for seq, count in sequences.items():
-            for j in range(len(seq) - 1):
-                pair_counts[(seq[j], seq[j + 1])] += count
-                pair_location[j] = (seq[j], seq[j+1]) #position 
+            new_bytes = id_to_token[a] + id_to_token[a]
+            if new_bytes in token_to_id:
+                new_id = token_to_id[token_bytes]
+            else:
+                new_id = len(token_to_id)
+                corpus.append((id_to_token[a],id_to_token[b]))
+                weights.append(freq)
+                id_to_token[new_id], token_to_id[new_bytes] = new_bytes, new_id
+                
+            occurrences = pair_locs.pop((a, b), []) # if (a,b) not null return a list of (seq index and position), else empty list []
+            for seq_idx, pos in occurrences :
+                w = weights[seq_idx]
+                seq = corpus[seq_idx]
 
-        if not pair_counts:
-            print(f"    No more pairs to merge at iteration {merge_idx}")
-            break  # nothing left to merge
+                # guard : if the sequence shrank earlier, this occurence may be stale
+                # example :  sequence = [a,b,a,b], when we merge the first (a, b) at position 0 and 1, the sequence becomes [new, a, b]
+                # the second occurence moved from (pos= 2) to (pos= 1), so the (seq_idx, pos) pair stored earlier is now wrong if you reuse it
+                # that why we check 
+                if pos >= len(seq)-1 or seq[pos] != a or seq[pos + 1] != b:
+                    continue  
+                
+                left = seq[pos - 1] if pos > 0 else None
+                right = seq[pos + 2] if pos + 2 < len(seq) else None
 
-        (a, b), _ = pair_counts.most_common(1)[0]
-        for i in range(1,len(pair_location)-2):
-            l_neighbors = pair_location[i-1]
-            r_neighbors = pair_location[i+1]
-            if l_neighbors==(a,b):
-                pair_counts[l_neighbors] -= 1
+                # decrements counts for pairs that dissappear
+                pair_counts[(a, b)] -= w
+                if left is not None:
+                    pair_counts[(left, a)] -= w
+                    weights[seq_idx-1] -= 1
+                    pair_locs[(left, a)].remove((seq_idx, pos - 1))
+                if right is not None:
+                    pair_counts[(b, right)] -= w
+                    weights[seq_idx+1] -= 1
+                    pair_locs[(b, right)].remove((seq_idx, pos + 1))
 
-            if r_neighbors[i+1]==(a,b):
-                pair_counts[r_neighbors] = 0
+                seq[pos] = new_id # replace 'a' with the new symbol
+                del seq[pos + 1] # drop 'b'
 
-        new_bytes = id_to_token[a] + id_to_token[b]
-        if new_bytes in token_to_id: # do not create a new id if the new_bytes created already exist
-            new_id = token_to_id[new_bytes]
-        else:
-            new_id = len(id_to_token)
-            merge_history.append((id_to_token[a], id_to_token[b]))
-            id_to_token[new_id] = new_bytes
-            token_to_id[new_bytes] = new_id
+                if left is not None:
+                    new_left = (left, new_id)
+                    pair_counts[new_left] += w
+                    pair_locs[new_left].append((seq_idx, pos -1))
+                if right is not None:
+                    new_right = (new_id, right)
+                    pair_counts[new_right] += w
+                    pair_locs[new_right].append((seq_idx, pos +1))
 
-            # See some id_to_token words after each merge
-            sample_ids = sorted(list(id_to_token.keys()))[:10]  # Show first 10 ids as an example
-            print(f"   id_to_token sample after merge {len(merge_history)}:")
-            for i in sample_ids:
-                val = id_to_token[i]
-                # Try to decode bytes sensibly; if not possible, show repr
-                try:
-                    s = val.decode('utf-8')
-                except Exception:
-                    s = repr(val)
-                print(f"     {i}: {s}")
+        
+                if pair_counts[(a,b)] == 0:
+                    del pair_counts[(a,b)]
 
+                pair_locs_for_seq = defaultdict(list)
+                for i in range( len(seq) - 1) :
+                    pair  = (seq[i], seq[i+1])
+                    pair_locs[pair].append((seq_idx, i))
 
-        updated_sequences: defaultdict[tuple[int, ...], int] = defaultdict(int)
-        for seq, count in sequences.items():
-            new_seq = replace_pair(seq, (a, b), new_id)
-            updated_sequences[new_seq] += count
-        sequences = dict(updated_sequences)
     
-    merge_time = time.time() - merge_start
-    total_time = time.time() - start_time
-    
-    print(f"   BPE merging completed in {merge_time:.2f} seconds")
+
     print(f"   Final vocabulary size: {len(id_to_token)}")
     print(f"   Total merges performed: {len(merge_history)}")
-    print(f"   Total BPE training time: {total_time:.2f} seconds")
     print("=" * 50)
     
     return id_to_token, merge_history
@@ -258,12 +312,10 @@ if __name__ == "__main__":
     # Compression rate calculation
     print(" COMPRESSION ANALYSIS")
     print("-" * 40)
-    compression_start = time.time()
+
     with open(input_path, "r", encoding = "utf-8") as f:
         text = f.read()
-    compression_time = time.time() - compression_start
     
-    print(f" Reading main file took: {compression_time:.2f} seconds")
     print(f" File size: {len(text)} characters")
     print(f" File size: {len(bytes(text, encoding='utf-8'))} bytes")
     
