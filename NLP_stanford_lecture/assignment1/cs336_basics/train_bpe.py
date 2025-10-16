@@ -1,10 +1,9 @@
 # libraries
-from datasets import load_dataset
 import regex as re
 import multiprocessing #to parallelize the tokenization 
 from collections import defaultdict, Counter
 import cProfile
-
+import pstats
 
 def get_compression_rate(token_list : list, string: str) ->float:
     """Given string that has been tokenized into indices """
@@ -45,10 +44,67 @@ def pretokenize(base_pattern :str, text: str,special_tokens: list[str]) -> dict[
     
     return dict(Counter(pre_tokenize_list))
 
+def update_occurrences(
+    pair: tuple[int, int],
+    new_id: int,
+    corpus: list[list[int]],
+    weights: list[int],
+    pair_counts: Counter[tuple[int,int]],
+    pair_locs: dict[tuple[int,int], list[tuple[int,int]]]
+    ):
+    a,b = pair
+    occurrences = pair_locs.pop((a, b), []) # if (a,b) not null return a list of (seq index and position), else empty list []
+    for seq_idx, pos in occurrences :
+        w = weights[seq_idx]
+        seq = corpus[seq_idx]
+
+        # guard : if the sequence shrank earlier, this occurence may be stale
+        # example :  sequence = [a,b,a,b], when we merge the first (a, b) at position 0 and 1, the sequence becomes [new, a, b]
+        # the second occurence moved from (pos= 2) to (pos= 1), so the (seq_idx, pos) pair stored earlier is now wrong if you reuse it
+        # that why we check 
+        if pos >= len(seq)-1 or seq[pos] != a or seq[pos + 1] != b:
+            continue  
+        
+        left = seq[pos - 1] if pos > 0 else None
+        right = seq[pos + 2] if pos + 2 < len(seq) else None
+
+        # decrements counts for pairs that dissappear
+        pair_counts[(a, b)] -= w
+        if left is not None:
+            pair_counts[(left, a)] -= w
+            pair_locs[(left, a)].remove((seq_idx, pos - 1))
+        if right is not None:
+            pair_counts[(b, right)] -= w
+            pair_locs[(b, right)].remove((seq_idx, pos + 1))
+
+        seq[pos] = new_id # replace 'a' with the new symbol
+        del seq[pos + 1] # drop 'b'
+
+        if left is not None:
+            new_left = (left, new_id)
+            pair_counts[new_left] += w
+            pair_locs[new_left].append((seq_idx, pos -1))
+        if right is not None:
+            new_right = (new_id, right)
+            pair_counts[new_right] += w
+            pair_locs[new_right].append((seq_idx, pos +1))
+
+
+        if pair_counts[(a,b)] == 0:
+            del pair_counts[(a,b)]
+        else :
+            pair_counts[(a, b)] -= 1
+
+        # rebuilt the new list 
+        pair_locs_for_seq = defaultdict(list)
+        for i in range( len(seq) - 1) :
+            pair  = (seq[i], seq[i+1])
+            pair_locs_for_seq[pair].append((seq_idx, i))
+    return
 
 
 def replace_pair(seq: tuple[int, ...], pair: tuple[int,int], new_id : int)->tuple[int,...]:
-    """    Return an tuple of updated pair   """
+    """    Return an tuple of updated pair, needed if the pair_count dict is created at each merge  """
 
     a, b = pair
     merged = []
@@ -184,7 +240,7 @@ def train_bpe(
             # handle special tokens
             seq = (token_to_id[token_bytes],)
         else:
-            seq = [token_to_id[bytes(b)] for b in token_bytes]
+            seq = [token_to_id[bytes([b])] for b in token_bytes]
         corpus.append(seq)
         weights.append(count)
 
@@ -193,75 +249,39 @@ def train_bpe(
     # pair counting
     pair_counts : Counter[tuple[int,int]] = Counter()
     pair_locs : dict[tuple[int,int],list[tuple[int,int]]] = defaultdict(list)
-    # pair_locs[(x, y)] = [(seq_idx, pos), ...]                                                                                             
-    for merge_idx in range (num_merges):
-        if not pair_counts: 
-            break
 
-        for seq_idx, seq in enumerate(corpus):
+
+    # starting counting 
+    for seq_idx, seq in enumerate(corpus):
             w = weights[seq_idx]
             for pos in range(len(seq) - 1):
                 pair = (seq[pos], seq[pos + 1])
                 pair_counts[pair] += w
                 pair_locs[pair].append((seq_idx, pos))
 
-            (a, b), freq = pair_counts.most_common(1)[0]
 
-            new_bytes = id_to_token[a] + id_to_token[a]
-            if new_bytes in token_to_id:
-                new_id = token_to_id[token_bytes]
-            else:
-                new_id = len(token_to_id)
-                corpus.append((id_to_token[a],id_to_token[b]))
-                weights.append(freq)
-                id_to_token[new_id], token_to_id[new_bytes] = new_bytes, new_id
-                
-            occurrences = pair_locs.pop((a, b), []) # if (a,b) not null return a list of (seq index and position), else empty list []
-            for seq_idx, pos in occurrences :
-                w = weights[seq_idx]
-                seq = corpus[seq_idx]
+    # pair_locs[(x, y)] = [(seq_idx, pos), ...]                                                                                             
+    for merge_idx in range (num_merges):
+        if not pair_counts: # no bigram left anywhere
+            break
 
-                # guard : if the sequence shrank earlier, this occurence may be stale
-                # example :  sequence = [a,b,a,b], when we merge the first (a, b) at position 0 and 1, the sequence becomes [new, a, b]
-                # the second occurence moved from (pos= 2) to (pos= 1), so the (seq_idx, pos) pair stored earlier is now wrong if you reuse it
-                # that why we check 
-                if pos >= len(seq)-1 or seq[pos] != a or seq[pos + 1] != b:
-                    continue  
-                
-                left = seq[pos - 1] if pos > 0 else None
-                right = seq[pos + 2] if pos + 2 < len(seq) else None
+        (a, b), freq = pair_counts.most_common(1)[0]
+        new_bytes = id_to_token[a] + id_to_token[b]
 
-                # decrements counts for pairs that dissappear
-                pair_counts[(a, b)] -= w
-                if left is not None:
-                    pair_counts[(left, a)] -= w
-                    weights[seq_idx-1] -= 1
-                    pair_locs[(left, a)].remove((seq_idx, pos - 1))
-                if right is not None:
-                    pair_counts[(b, right)] -= w
-                    weights[seq_idx+1] -= 1
-                    pair_locs[(b, right)].remove((seq_idx, pos + 1))
-
-                seq[pos] = new_id # replace 'a' with the new symbol
-                del seq[pos + 1] # drop 'b'
-
-                if left is not None:
-                    new_left = (left, new_id)
-                    pair_counts[new_left] += w
-                    pair_locs[new_left].append((seq_idx, pos -1))
-                if right is not None:
-                    new_right = (new_id, right)
-                    pair_counts[new_right] += w
-                    pair_locs[new_right].append((seq_idx, pos +1))
-
+        # add the new merged bytes to the sequences and create new id if it is not already the case
+        if new_bytes in token_to_id:
+            new_id = token_to_id[new_bytes]
+        else:
+            new_id = len(token_to_id)
+            # merge_history.append((id_to_token[a], id_to_token[b]))
+            corpus.append((a,b)) # adding the pair of id
+            weights.append(freq)                           # and its frequency
+            id_to_token[new_id], token_to_id[new_bytes] = new_bytes, new_id
         
-                if pair_counts[(a,b)] == 0:
-                    del pair_counts[(a,b)]
-
-                pair_locs_for_seq = defaultdict(list)
-                for i in range( len(seq) - 1) :
-                    pair  = (seq[i], seq[i+1])
-                    pair_locs[pair].append((seq_idx, i))
+        update_occurrences(pair=(a,b), new_id=new_id, corpus=corpus,
+                            weights=weights, pair_counts=pair_counts,                                                                     
+                            pair_locs=pair_locs)
+       
 
     
 
@@ -274,51 +294,57 @@ def train_bpe(
 
 
 if __name__ == "__main__":
-    print("=" * 60)
-    print("  BPE TOKENIZER TRAINING WITH TIMING ANALYSIS")
-    print("=" * 60)
-    
-    # init variable
-    input_path_test = r"C:\Users\theo-\OneDrive\Documents\VS Code project\academic_project\NLP_stanford_lecture\assignment1\cs336_basics\dataset\testing_file.txt"
-    input_path = r"C:\Users\theo-\OneDrive\Documents\VS Code project\academic_project\NLP_stanford_lecture\assignment1\cs336_basics\dataset\TinyStoriesV2-GPT4-valid.txt"
-    vocab_size = 600
-    special_tokens =  ["<|endoftext|>"]
+    with cProfile.Profile() as profile:
+            
+        print("=" * 60)
+        print("  BPE TOKENIZER TRAINING WITH TIMING ANALYSIS")
+        print("=" * 60)
 
-    print(f" Configuration:")
-    print(f"   • Test file: {input_path_test}")
-    print(f"   • Main file: {input_path}")
-    print(f"   • Vocabulary size: {vocab_size}")
-    print(f"   • Special tokens: {special_tokens}")
-    print()
+        # init variable
+        input_path_test = r"C:\Users\theo-\OneDrive\Documents\VS Code project\academic_project\NLP_stanford_lecture\assignment1\cs336_basics\dataset\testing_file.txt"
+        input_path = r"C:\Users\theo-\OneDrive\Documents\VS Code project\academic_project\NLP_stanford_lecture\assignment1\cs336_basics\dataset\TinyStoriesV2-GPT4-valid.txt"
+        vocab_size = 600
+        special_tokens =  ["<|endoftext|>"]
 
-    # test for pretokenize step   
-    text_test = "some text that i'll pre-tokenize and by pre-tokenize, I speak about pre-tokenize and i'll be right every time<|endoftext|>" 
+        print(f" Configuration:")
+        print(f"   • Test file: {input_path_test}")
+        print(f"   • Main file: {input_path}")
+        print(f"   • Vocabulary size: {vocab_size}")
+        print(f"   • Special tokens: {special_tokens}")
+        print()
 
-    # pretoken_counts= pretokenize(r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""",text_test,special_tokens)
-    # print(pretoken_counts)
-    # result
-    # Special tokens: ['<|endoftext|>']
-    # Escaped special pattern: <\|endoftext\|>
-    # Base pattern: '(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+
-    # Full pattern: (<\|endoftext\|>)|('(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+)
-    # it is working well
-    # {b'some': 1, b' text': 1, b' that': 1, b' i': 2, b"'ll": 2, b' pre': 3, b'-': 3, b'tokenize': 3, b' and': 2, b' by': 1, b',': 1, b' I': 1, b' speak': 1, b' about': 1, b' be': 1, b' right': 1, b' every': 1, b' time': 1, b'<|endoftext|>': 1}
+        # test for pretokenize step   
+        text_test = "some text that i'll pre-tokenize and by pre-tokenize, I speak about pre-tokenize and i'll be right every time<|endoftext|>" 
 
-    # Training BPE tokenizer
-    print(" TRAINING BPE TOKENIZER")
-    print("-" * 40)
-    id_to_token, merge_list = train_bpe(input_path_test, vocab_size, special_tokens)
+        # pretoken_counts= pretokenize(r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""",text_test,special_tokens)
+        # print(pretoken_counts)
+        # result
+        # Special tokens: ['<|endoftext|>']
+        # Escaped special pattern: <\|endoftext\|>
+        # Base pattern: '(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+
+        # Full pattern: (<\|endoftext\|>)|('(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+)
+        # it is working well
+        # {b'some': 1, b' text': 1, b' that': 1, b' i': 2, b"'ll": 2, b' pre': 3, b'-': 3, b'tokenize': 3, b' and': 2, b' by': 1, b',': 1, b' I': 1, b' speak': 1, b' about': 1, b' be': 1, b' right': 1, b' every': 1, b' time': 1, b'<|endoftext|>': 1}
 
-    # Compression rate calculation
-    print(" COMPRESSION ANALYSIS")
-    print("-" * 40)
+        # Training BPE tokenizer
+        print(" TRAINING BPE TOKENIZER")
+        print("-" * 40)
+        id_to_token, merge_list = train_bpe(input_path, vocab_size, special_tokens)
 
-    with open(input_path, "r", encoding = "utf-8") as f:
-        text = f.read()
-    
-    print(f" File size: {len(text)} characters")
-    print(f" File size: {len(bytes(text, encoding='utf-8'))} bytes")
-    
-    compression_rate = get_compression_rate(id_to_token, text)
-    print(f" Compression rate: {compression_rate:.2f}")
-    print("=" * 60)
+        # Compression rate calculation
+        print(" COMPRESSION ANALYSIS")
+        print("-" * 40)
+
+        with open(input_path, "r", encoding = "utf-8") as f:
+            text = f.read()
+
+        print(f" File size: {len(text)} characters")
+        print(f" File size: {len(bytes(text, encoding='utf-8'))} bytes")
+
+        compression_rate = get_compression_rate(id_to_token, text)
+        print(f" Compression rate: {compression_rate:.2f}")
+        print("=" * 60)
+
+    results = pstats.Stats(profile)
+    results.sort_stats(pstats.SortKey.TIME)
+    results.print_stats(20)
