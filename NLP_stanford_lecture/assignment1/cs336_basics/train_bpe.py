@@ -273,7 +273,7 @@ def train_bpe(
             new_id = token_to_id[new_bytes]
         else:
             new_id = len(token_to_id)
-            # merge_history.append((id_to_token[a], id_to_token[b]))
+            merge_history.append((id_to_token[a], id_to_token[b]))
             corpus.append((a,b)) # adding the pair of id
             weights.append(freq)                           # and its frequency
             id_to_token[new_id], token_to_id[new_bytes] = new_bytes, new_id
@@ -281,9 +281,7 @@ def train_bpe(
         update_occurrences(pair=(a,b), new_id=new_id, corpus=corpus,
                             weights=weights, pair_counts=pair_counts,                                                                     
                             pair_locs=pair_locs)
-       
-
-    
+        
 
     print(f"   Final vocabulary size: {len(id_to_token)}")
     print(f"   Total merges performed: {len(merge_history)}")
