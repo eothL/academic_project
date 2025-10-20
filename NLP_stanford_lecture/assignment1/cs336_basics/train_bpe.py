@@ -1,7 +1,6 @@
 # libraries
 import regex as re
-import multiprocessing #to parallelize the tokenization 
-from collections import defaultdict, Counter
+from collections import Counter, defaultdict
 import cProfile
 import pstats
 
@@ -25,24 +24,45 @@ def pretokenize(base_pattern :str, text: str,special_tokens: list[str]) -> dict[
     else:
         full_pattern = base_pattern
 
-    # # DEBUG: Let's see what patterns are being created
-    # print(f"Special tokens: {special_tokens}")
-    # print(f"Escaped special pattern: {special_pattern}")
-    # print(f"Base pattern: {base_pattern}")
-    # print(f"Full pattern: {full_pattern}")
-
-    # try: 
-    #     re.compile(full_pattern)
-    #     print("working pattern")
-    # except re.error as e:
-    #     raise ValueError(f'invalid regex pattern: {e}')
+    pattern = re.compile(full_pattern)
+    counts: Counter[bytes] = Counter()
+    for match in pattern.finditer(text):
+        counts[match.group(0).encode("utf-8")] += 1
+    return dict(counts)
 
 
-    pre_tokenize_list = []
-    for match in re.finditer(full_pattern,text):
-        pre_tokenize_list.append(match.group(0).encode("utf-8")) # we add and convert the word into bytes 
-    
-    return dict(Counter(pre_tokenize_list))
+def _increment_pair(
+    pair_counts: Counter[tuple[int, int]],
+    pair_locs: dict[tuple[int, int], set[tuple[int, int]]],
+    pair: tuple[int, int],
+    weight: int,
+    occurrence: tuple[int, int]
+) -> None:
+    pair_counts[pair] += weight
+    pair_locs[pair].add(occurrence)
+
+
+def _decrement_pair(
+    pair_counts: Counter[tuple[int, int]],
+    pair_locs: dict[tuple[int, int], set[tuple[int, int]]],
+    pair: tuple[int, int],
+    weight: int,
+    occurrence: tuple[int, int] | None = None
+) -> None:
+    if pair not in pair_counts:
+        return
+    pair_counts[pair] -= weight
+    if pair_counts[pair] <= 0:
+        pair_counts.pop(pair, None)
+        pair_locs.pop(pair, None)
+        return
+    if occurrence is not None:
+        locs = pair_locs.get(pair)
+        if locs:
+            locs.discard(occurrence)
+            if not locs:
+                pair_locs.pop(pair, None)
+
 
 def update_occurrences(
     pair: tuple[int, int],
@@ -50,75 +70,36 @@ def update_occurrences(
     corpus: list[list[int]],
     weights: list[int],
     pair_counts: Counter[tuple[int,int]],
-    pair_locs: dict[tuple[int,int], list[tuple[int,int]]]
-    ):
-    a,b = pair
-    occurrences = pair_locs.pop((a, b), []) # if (a,b) not null return a list of (seq index and position), else empty list []
-    for seq_idx, pos in occurrences :
-        w = weights[seq_idx]
+    pair_locs: dict[tuple[int,int], set[tuple[int,int]]]
+    ) -> None:
+
+    a, b = pair
+    occurrences = pair_locs.pop(pair, set())
+    for seq_idx, pos in sorted(occurrences, key=lambda item: item[1], reverse=True):
         seq = corpus[seq_idx]
 
-        # guard : if the sequence shrank earlier, this occurence may be stale
-        # example :  sequence = [a,b,a,b], when we merge the first (a, b) at position 0 and 1, the sequence becomes [new, a, b]
-        # the second occurence moved from (pos= 2) to (pos= 1), so the (seq_idx, pos) pair stored earlier is now wrong if you reuse it
-        # that why we check 
-        if pos >= len(seq)-1 or seq[pos] != a or seq[pos + 1] != b:
-            continue  
-        
+        if pos >= len(seq) - 1 or seq[pos] != a or seq[pos + 1] != b:
+            continue
+
+        weight = weights[seq_idx]
         left = seq[pos - 1] if pos > 0 else None
         right = seq[pos + 2] if pos + 2 < len(seq) else None
 
-        # decrements counts for pairs that dissappear
-        pair_counts[(a, b)] -= w
+        _decrement_pair(pair_counts, pair_locs, pair, weight)
         if left is not None:
-            pair_counts[(left, a)] -= w
-            pair_locs[(left, a)].remove((seq_idx, pos - 1))
+            _decrement_pair(pair_counts, pair_locs, (left, a), weight, (seq_idx, pos - 1))
         if right is not None:
-            pair_counts[(b, right)] -= w
-            pair_locs[(b, right)].remove((seq_idx, pos + 1))
+            _decrement_pair(pair_counts, pair_locs, (b, right), weight, (seq_idx, pos + 1))
 
-        seq[pos] = new_id # replace 'a' with the new symbol
-        del seq[pos + 1] # drop 'b'
+        seq[pos] = new_id
+        del seq[pos + 1]
 
         if left is not None:
-            new_left = (left, new_id)
-            pair_counts[new_left] += w
-            pair_locs[new_left].append((seq_idx, pos -1))
+            _increment_pair(pair_counts, pair_locs, (left, new_id), weight, (seq_idx, pos - 1))
         if right is not None:
-            new_right = (new_id, right)
-            pair_counts[new_right] += w
-            pair_locs[new_right].append((seq_idx, pos +1))
+            _increment_pair(pair_counts, pair_locs, (new_id, right), weight, (seq_idx, pos))
 
-
-        if pair_counts[(a,b)] == 0:
-            del pair_counts[(a,b)]
-        else :
-            pair_counts[(a, b)] -= 1
-
-        # rebuilt the new list 
-        pair_locs_for_seq = defaultdict(list)
-        for i in range( len(seq) - 1) :
-            pair  = (seq[i], seq[i+1])
-            pair_locs_for_seq[pair].append((seq_idx, i))
-    return
-
-
-def replace_pair(seq: tuple[int, ...], pair: tuple[int,int], new_id : int)->tuple[int,...]:
-    """    Return an tuple of updated pair, needed if the pair_count dict is created at each merge  """
-
-    a, b = pair
-    merged = []
-    i = 0
-    while i < len(seq) :
-        if i < len(seq) - 1 and seq[i] == a and seq[i+1] == b:
-            merged.append(new_id)
-            i += 2
-        else:
-            merged.append(seq[i])
-            i += 1
-
-    return tuple(merged)
-
+    pair_counts.pop(pair, None)
 
 
 def train_bpe(
@@ -138,9 +119,10 @@ def train_bpe(
     # Phase 2: Pretokenization
     print(" Pretokenizing text...")
     gpt2_regex = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
-    pretoken_counts = pretokenize(gpt2_regex, data, special_tokens)
+    # corpus split into character or words or smaller units based on the regex pattern chosen and its frequencies
+    corpus_counts = pretokenize(gpt2_regex, data, special_tokens) # return dict(byte:count)
 
-    print(f"    Found {len(pretoken_counts)} unique pretokens")
+    print(f"    Found {len(corpus_counts)} unique pretokens")
 
     # Phase 3: Vocabulary initialization
     print(" Initializing vocabulary...")
@@ -229,43 +211,44 @@ def train_bpe(
     # we are now using two list of mutable token sequences instead of dict mapping tupple[int, ...] -> count 
     # build a list of mutable token sequences 
     # one per occurence in the corpus and to avoid duplicating a string n times for counting, we are adding a weight link to the occurence
+
     # initialization of the corpus and its counting with the pretokenize text
-    corpus: list[list[int]] = []
-    weights: list[int] = [] # fix frequence of a word, we could call it freqs or counts here 
+    tokenized_corpus: list[list[int]] = []
+    corpus_weights: list[int] = [] # associate each tokenized word/subword to its frequencies in the tokenized corpus 
 
     # each list in corpus is still a chunck of the original text, just expressed as ids instead of raw characters
     
-    for token_bytes, count in pretoken_counts.items():
-        if token_bytes in token_to_id: 
+    for token_bytes, count in corpus_counts.items():
+        if token_bytes in token_to_id:
             # handle special tokens
-            seq = (token_to_id[token_bytes],)
+            seq = [token_to_id[token_bytes]]
         else:
             seq = [token_to_id[bytes([b])] for b in token_bytes]
-        corpus.append(seq)
-        weights.append(count)
+        tokenized_corpus.append(seq)
+        corpus_weights.append(count)
 
     # Phase 5: BPE Merging
     print(f" Starting BPE merging ({num_merges} merges)...")
     # pair counting
     pair_counts : Counter[tuple[int,int]] = Counter()
-    pair_locs : dict[tuple[int,int],list[tuple[int,int]]] = defaultdict(list)
+    pair_locs : dict[tuple[int,int],set[tuple[int,int]]] = defaultdict(set)
 
 
     # starting counting 
-    for seq_idx, seq in enumerate(corpus):
-            w = weights[seq_idx]
+    for seq_idx, seq in enumerate(tokenized_corpus):
+            w = corpus_weights[seq_idx]
             for pos in range(len(seq) - 1):
                 pair = (seq[pos], seq[pos + 1])
                 pair_counts[pair] += w
-                pair_locs[pair].append((seq_idx, pos))
+                pair_locs[pair].add((seq_idx, pos))
 
 
     # pair_locs[(x, y)] = [(seq_idx, pos), ...]                                                                                             
-    for merge_idx in range (num_merges):
+    for _ in range (num_merges):
         if not pair_counts: # no bigram left anywhere
             break
 
-        (a, b), freq = pair_counts.most_common(1)[0]
+        (a, b), _ = pair_counts.most_common(1)[0]
         new_bytes = id_to_token[a] + id_to_token[b]
 
         # add the new merged bytes to the sequences and create new id if it is not already the case
@@ -274,12 +257,10 @@ def train_bpe(
         else:
             new_id = len(token_to_id)
             merge_history.append((id_to_token[a], id_to_token[b]))
-            corpus.append((a,b)) # adding the pair of id
-            weights.append(freq)                           # and its frequency
             id_to_token[new_id], token_to_id[new_bytes] = new_bytes, new_id
         
-        update_occurrences(pair=(a,b), new_id=new_id, corpus=corpus,
-                            weights=weights, pair_counts=pair_counts,                                                                     
+        update_occurrences(pair=(a,b), new_id=new_id, corpus=tokenized_corpus,
+                            weights=corpus_weights, pair_counts=pair_counts,                                                                     
                             pair_locs=pair_locs)
         
 
@@ -301,7 +282,7 @@ if __name__ == "__main__":
         # init variable
         input_path_test = r"C:\Users\theo-\OneDrive\Documents\VS Code project\academic_project\NLP_stanford_lecture\assignment1\cs336_basics\dataset\testing_file.txt"
         input_path = r"C:\Users\theo-\OneDrive\Documents\VS Code project\academic_project\NLP_stanford_lecture\assignment1\cs336_basics\dataset\TinyStoriesV2-GPT4-valid.txt"
-        vocab_size = 600
+        vocab_size = 42250000
         special_tokens =  ["<|endoftext|>"]
 
         print(f" Configuration:")
