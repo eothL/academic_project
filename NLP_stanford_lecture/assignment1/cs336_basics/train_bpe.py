@@ -3,6 +3,8 @@ import regex as re
 from collections import Counter, defaultdict
 import cProfile
 import pstats
+from pretokenization_example import find_chunk_boundaries 
+git
 
 def get_compression_rate(token_list : list, string: str) ->float:
     """Given string that has been tokenized into indices """
@@ -24,6 +26,7 @@ def pretokenize(base_pattern :str, text: str,special_tokens: list[str]) -> dict[
     else:
         full_pattern = base_pattern
 
+    # re.compile the pattern once and saves it as a pattern object, so it can be reusable
     pattern = re.compile(full_pattern)
     counts: Counter[bytes] = Counter()
     for match in pattern.finditer(text):
@@ -159,54 +162,7 @@ def train_bpe(
     num_merges = vocab_size - base_size
     
     # prepares sequences once : initialization  
-
-    # --------------old way for a naive loop--------------------------------------------------------------------------------------------
-    # sequences: dict[tuple[int, ...], int] = {}  # updated corpus: maps token id tuples to counts
-    # we are building here a dictionary whose keys are tupples of ids (current token sequences) and whose values are the counts 
-    # keep in minds that BPE works over token ids, so the first thing we do is express each pre-token as a sequence of ids. 
-
-    # for token_bytes, count in pretoken_counts.items(): 
-    #     # initialization of the updated corpus : we transfer every data from the pre tokenize list to the sequences
-    #     if token_bytes in token_to_id: # handle special token as they are already in the vocab 
-    #         seq = (token_to_id[token_bytes],) # for a special token, we only have one element tuple 
-    #     else:                                 # but for other words, we have multiple byte per word, for example the could be represented by a tuple like (116,104,101)
-    #         seq = tuple([token_to_id[bytes([b])] for b in token_bytes]) # so we have to add every bytes inside the tuple to add the sequences 
-    #     # The .get() method for dictionaries takes two arguments:
-    #     #   - The key to look up (here, 'seq')
-    #     #   - A default value to return if the key is not found (here, 0)
-    #     # It returns the value associated with 'seq' if it exists in 'sequences', otherwise it returns 0.
-    #     sequences[seq] = sequences.get(seq, 0) + count #safeguard to use sequences.get(seq,0) + count instead of just count
-    #     # In which scenario we need it ? : if we go through another chunk and we encounter the same tuple, we will add the count 
-    #     # instead of rewriting it
-
-    # for merge_idx in range(num_merges):
-    #     pair_counts = Counter()  # count how often each adjacent pair occurs
-    #     for seq, count in sequences.items():
-    #         for j in range(len(seq) - 1):
-    #             pair_counts[(seq[j], seq[j + 1])] += count
-
-    #     if not pair_counts:
-    #         print(f"    No more pairs to merge at iteration {merge_idx}")
-    #         break  # nothing left to merge
-
-    #     (a, b), _ = pair_counts.most_common(1)[0]
-
-    #     new_bytes = id_to_token[a] + id_to_token[b]
-    #     if new_bytes in token_to_id: # do not create a new id if the new_bytes created already exist
-    #         new_id = token_to_id[new_bytes]
-    #     else:
-    #         new_id = len(id_to_token)
-    #         merge_history.append((id_to_token[a], id_to_token[b]))
-    #         id_to_token[new_id] = new_bytes
-    #         token_to_id[new_bytes] = new_id
-
-    #     updated_sequences: defaultdict[tuple[int, ...], int] = defaultdict(int)
-    #     for seq, count in sequences.items():
-    #         new_seq = replace_pair(seq, (a, b), new_id)
-    #         updated_sequences[new_seq] += count
-    #     sequences = dict(updated_sequences)
-    # --------------/old way for a naive loop--------------------------------------------------------------------------------------------
-    
+    # to look at the approach : look at the v0 version
     # --------------different approach to accelerate pair_counting : by updating only changed pair---------------------------------------
     # we are now using two list of mutable token sequences instead of dict mapping tupple[int, ...] -> count 
     # build a list of mutable token sequences 
@@ -282,18 +238,12 @@ if __name__ == "__main__":
         # init variable
         input_path_test = r"C:\Users\theo-\OneDrive\Documents\VS Code project\academic_project\NLP_stanford_lecture\assignment1\cs336_basics\dataset\testing_file.txt"
         input_path = r"C:\Users\theo-\OneDrive\Documents\VS Code project\academic_project\NLP_stanford_lecture\assignment1\cs336_basics\dataset\TinyStoriesV2-GPT4-valid.txt"
-        vocab_size = 42250000
+        input_test = r"C:\Users\theo-\OneDrive\Documents\VS Code project\academic_project\NLP_stanford_lecture\assignment1\cs336_basics\dataset\test.txt"
+        vocab_size = 42250000*4
         special_tokens =  ["<|endoftext|>"]
 
-        print(f" Configuration:")
-        print(f"   • Test file: {input_path_test}")
-        print(f"   • Main file: {input_path}")
-        print(f"   • Vocabulary size: {vocab_size}")
-        print(f"   • Special tokens: {special_tokens}")
-        print()
-
         # test for pretokenize step   
-        text_test = "some text that i'll pre-tokenize and by pre-tokenize, I speak about pre-tokenize and i'll be right every time<|endoftext|>" 
+        # text_test = "some text that i'll pre-tokenize and by pre-tokenize, I speak about pre-tokenize and i'll be right every time<|endoftext|>" 
 
         # pretoken_counts= pretokenize(r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""",text_test,special_tokens)
         # print(pretoken_counts)
@@ -308,6 +258,14 @@ if __name__ == "__main__":
         # Training BPE tokenizer
         print(" TRAINING BPE TOKENIZER")
         print("-" * 40)
+        # id_test, merge_test = train_bpe(input_test,vocab_size= 300, special_tokens=special_tokens)
+        # id_test_2, merge_test_2 = train_bpe(input_path_test, vocab_size= 3000, special_tokens=special_tokens)
+        print(f" Configuration:")
+        print(f"   • Test file: {input_path_test}")
+        print(f"   • Main file: {input_path}")
+        print(f"   • Vocabulary size: {vocab_size}")
+        print(f"   • Special tokens: {special_tokens}\n")
+
         id_to_token, merge_list = train_bpe(input_path, vocab_size, special_tokens)
 
         # Compression rate calculation
