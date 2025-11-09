@@ -1,0 +1,5 @@
+# CPU-only JAX + testing
+jax[cpu]>=0.4.30
+jaxlib>=0.4.30
+numpy>=1.26
+pytest>=8.0

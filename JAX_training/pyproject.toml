@@ -1,0 +1,9 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jax-transpose"
+version = "0.1.0"
+description = "Test harness for a JAX transpose implementation"
+requires-python = ">=3.10"
