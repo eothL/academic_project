@@ -8,7 +8,6 @@ NLP_stanford_lecture/assignment1/cs336_basics/dataset/
 # Python envs
 venv/
 JAX_training/jax.venv/
-JAX_training/
 # Python cache
 .pytest_cache/
 # OS / editor

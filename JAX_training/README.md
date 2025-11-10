@@ -24,3 +24,7 @@ Do NOT change the function name or signature.
 ## Notes
 - Tests check shape/value correctness, involution (T(T(X)) == X), grad/VJP property, JIT/vmap behavior, and dtype preservation.
 - If you want GPU JAX later, follow official JAX installation docs for your CUDA/cuDNN version.
+
+
+## Good resources for JAX
+- https://github.com/jax-ml/scaling-book
