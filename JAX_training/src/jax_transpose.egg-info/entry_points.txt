@@ -1,0 +1,2 @@
+[console_scripts]
+jax-practice = jax_practice.cli:app

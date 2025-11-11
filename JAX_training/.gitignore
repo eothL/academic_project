@@ -1,0 +1,6 @@
+__pycache__/
+.pytest_cache/
+.venv/
+jax.venv/
+workspace/*.py
+workspace/*.ipynb

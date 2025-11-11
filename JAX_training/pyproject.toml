@@ -1,9 +1,24 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=64", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "jax-transpose"
 version = "0.1.0"
-description = "Test harness for a JAX transpose implementation"
-requires-python = ">=3.10"
+description = "Local JAX practice playground with LeetCode-style problems"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [
+  { name = "Theo" }
+]
+dependencies = [
+  "jax",
+  "typer>=0.12"
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+namespaces = false
+
+[project.scripts]
+jax-practice = "jax_practice.cli:app"
